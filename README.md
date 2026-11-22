@@ -1,4 +1,3 @@
-# quemesttt.github.io
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -1643,6 +1642,7 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
           <div class="progress-track" aria-hidden="true"><div class="progress-fill" id="progress-fill"></div></div>
           <span class="progress-count" id="progress-count">0 de 140 feitas</span>
           <span class="progress-count" id="doubt-count" style="color:#B45309;">0 com dúvida</span>
+          <span class="progress-count" id="sync-status" style="font-weight:500;color:var(--mute);"></span>
         </div>
         <div class="tf-chips" id="tf-chips-status" style="margin-top:10px;">
           <button type="button" class="tf-diff-chip" data-status="done" aria-pressed="false"><span>✓ Feitas</span><span class="tf-chip-count" id="cnt-done">0</span></button>
@@ -7942,6 +7942,80 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
   }
   loadDoubt();
 
+  // ---- Sincronização compartilhada (Firebase Realtime Database) ----
+  // Cole aqui a URL do seu banco, ex.: 'https://meu-projeto-default-rtdb.firebaseio.com'
+  // Deixe vazio ('') para salvar só neste navegador.
+  var SYNC_URL = 'https://uerjsite-default-rtdb.firebaseio.com';
+  var SYNC_INTERVAL_MS = 20000;
+  var syncPending = 0;
+  var firstSyncDone = false;
+  function syncOn() { return !!SYNC_URL; }
+  function syncKey(qid) { return String(qid).replace(/[^A-Za-z0-9]+/g, '_'); }
+  function setSyncStatus(text, kind) {
+    var el = document.getElementById('sync-status');
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.color = kind === 'warn' ? '#B45309' : (kind === 'ok' ? '#166534' : 'var(--mute)');
+  }
+  function syncUrl(path) { return SYNC_URL.replace(/\/+$/, '') + '/' + path + '.json'; }
+  function syncSet(coll, qid, value) {
+    if (!syncOn()) return;
+    var url = syncUrl(coll + '/' + syncKey(qid));
+    syncPending++;
+    fetch(url, value ? { method: 'PUT', body: JSON.stringify(value) } : { method: 'DELETE' })
+      .then(function(r) { if (!r.ok) throw new Error('http'); setSyncStatus('● compartilhado com todos', 'ok'); })
+      .catch(function() { setSyncStatus('⚠ sem conexão com o servidor — marcação só neste navegador', 'warn'); })
+      .then(function() { syncPending--; });
+  }
+  function syncPushAll(coll, map) {
+    if (!syncOn()) return;
+    var body = {};
+    for (var qid in map) { if (Object.prototype.hasOwnProperty.call(map, qid)) body[syncKey(qid)] = map[qid]; }
+    if (!Object.keys(body).length) return;
+    syncPending++;
+    fetch(syncUrl(coll), { method: 'PATCH', body: JSON.stringify(body) })
+      .catch(function() { setSyncStatus('⚠ sem conexão com o servidor — marcação só neste navegador', 'warn'); })
+      .then(function() { syncPending--; });
+  }
+  function fromRemote(remote) {
+    var out = {};
+    if (!remote || typeof remote !== 'object') return out;
+    for (var i = 0; i < allQaItems.length; i++) {
+      var qid = allQaItems[i].getAttribute('data-qid');
+      var v = remote[syncKey(qid)];
+      if (v) out[qid] = v;
+    }
+    return out;
+  }
+  function syncPull() {
+    if (!syncOn() || syncPending > 0) return;
+    Promise.all([
+      fetch(syncUrl('feitas')).then(function(r) { if (!r.ok) throw new Error('http'); return r.json(); }),
+      fetch(syncUrl('duvidas')).then(function(r) { if (!r.ok) throw new Error('http'); return r.json(); })
+    ]).then(function(res) {
+      if (syncPending > 0) return;
+      var rDone = res[0], rDoubt = res[1];
+      if (!firstSyncDone) {
+        firstSyncDone = true;
+        // banco vazio: sobe o que já estava salvo neste navegador
+        if (!rDone && Object.keys(doneMap).length) { syncPushAll('feitas', doneMap); rDone = null; var keepDone = true; }
+        if (!rDoubt && Object.keys(doubtMap).length) { syncPushAll('duvidas', doubtMap); rDoubt = null; var keepDoubt = true; }
+      }
+      var newDone = (typeof keepDone !== 'undefined') ? doneMap : fromRemote(rDone);
+      var newDoubt = (typeof keepDoubt !== 'undefined') ? doubtMap : fromRemote(rDoubt);
+      var changed = JSON.stringify(newDone) !== JSON.stringify(doneMap) || JSON.stringify(newDoubt) !== JSON.stringify(doubtMap);
+      doneMap = newDone; doubtMap = newDoubt;
+      setSyncStatus('● compartilhado com todos', 'ok');
+      if (changed) {
+        saveDone(); saveDoubt();
+        for (var i = 0; i < allQaItems.length; i++) refreshDoneUI(allQaItems[i]);
+        if (selectedStatus !== 'all') applyFilters(); else refreshProgressSummary();
+      }
+    }).catch(function() {
+      setSyncStatus('⚠ sem conexão com o servidor — usando só este navegador', 'warn');
+    });
+  }
+
   // Index and progressively enhance exam groups and question accordions
   var qGlobalIdx = 0;
   for (var g = 0; g < examGroups.length; g++) {
@@ -8509,6 +8583,7 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
         var qid = qaDoubt.getAttribute('data-qid');
         if (doubtMap[qid]) { delete doubtMap[qid]; } else { doubtMap[qid] = Date.now(); }
         saveDoubt();
+        syncSet('duvidas', qid, doubtMap[qid] || null);
         refreshDoneUI(qaDoubt);
         if (selectedStatus === 'doubt') {
           applyFilters();
@@ -8529,6 +8604,7 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
         var did = qaDone.getAttribute('data-qid');
         if (doneMap[did]) { delete doneMap[did]; } else { doneMap[did] = Date.now(); }
         saveDone();
+        syncSet('feitas', did, doneMap[did] || null);
         refreshDoneUI(qaDone);
         if (selectedStatus !== 'all') {
           applyFilters(); // a questão pode sair/entrar do filtro atual
@@ -8743,6 +8819,8 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
           }
           saveDone();
           saveDoubt();
+          syncPushAll('feitas', doneMap);
+          syncPushAll('duvidas', doubtMap);
           for (var j = 0; j < allQaItems.length; j++) refreshDoneUI(allQaItems[j]);
           applyFilters();
           setBkMsg('Backup importado: ' + added + (added === 1 ? ' questão nova marcada.' : ' questões novas marcadas.') + ' Dúvidas novas: ' + addedDoubt + '. (as que você já tinha foram mantidas)', 'ok');
@@ -8758,6 +8836,14 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
   setBkMsg();
   syncGlobalZoomUI();
   applyFilters();
+  if (syncOn()) {
+    var lbl = document.querySelector('#tf-group-progress .tf-group-label span[style*="font-weight:400"]');
+    if (lbl) lbl.textContent = '(compartilhado com todos que usam o site)';
+    setSyncStatus('sincronizando…');
+    syncPull();
+    setInterval(syncPull, SYNC_INTERVAL_MS);
+    document.addEventListener('visibilitychange', function() { if (!document.hidden) syncPull(); });
+  }
 })();
 </script>
 
