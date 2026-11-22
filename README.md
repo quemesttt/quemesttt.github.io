@@ -7946,6 +7946,7 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
   // Cole aqui a URL do seu banco, ex.: 'https://meu-projeto-default-rtdb.firebaseio.com'
   // Deixe vazio ('') para salvar só neste navegador.
   var SYNC_URL = 'https://uerjsite-default-rtdb.firebaseio.com';
+  window.UERJ_SYNC_URL = SYNC_URL;
   var SYNC_INTERVAL_MS = 20000;
   var syncPending = 0;
   var firstSyncDone = false;
@@ -8852,6 +8853,128 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
 (function() {
   var wbStates = {};
 
+  // ---- Persistência dos quadros (navegador + banco compartilhado) ----
+  var WB_LOCAL_PREFIX = 'uerj-quadro-v1-';
+  var WB_SAVE_DELAY_MS = 1500;
+  function wbSyncBase() { return (window.UERJ_SYNC_URL || '').replace(/\/+$/, ''); }
+  function wbRemoteUrl(idx) { return wbSyncBase() + '/quadros/q' + idx + '.json'; }
+
+  function wbPack(state) {
+    var w = state.width || 1;
+    var strokes = [];
+    for (var i = 0; i < state.strokes.length; i++) {
+      var st = state.strokes[i];
+      var pts = st.points || [];
+      var flat = [];
+      var lx = -1e9, ly = -1e9;
+      for (var j = 0; j < pts.length; j++) {
+        var x = pts[j].x, y = pts[j].y;
+        if (j === 0 || j === pts.length - 1 || Math.abs(x - lx) + Math.abs(y - ly) >= 2) {
+          flat.push(Math.round(x / w * 10000) / 10000, Math.round(y * 10) / 10);
+          lx = x; ly = y;
+        }
+      }
+      if (flat.length) strokes.push({ k: st.tool, c: st.color, z: st.size, p: flat });
+    }
+    return { v: 1, h: state.boxHeight, b: state.bgIndex, n: state.notes.value || '', s: strokes, t: Date.now() };
+  }
+
+  function wbIsEmpty(state) {
+    return state.strokes.length === 0 && !(state.notes.value && state.notes.value.trim());
+  }
+
+  function wbApply(state, d) {
+    if (!d || typeof d !== 'object') return;
+    var h = Number(d.h);
+    if (h >= 360 && h <= 2200) {
+      state.boxHeight = h;
+      state.stage.style.height = h + 'px';
+    }
+    var bi = Number(d.b) || 0;
+    if (bi >= 0 && bi < BGS.length) { state.bgIndex = bi; state.bg = BGS[bi].id; }
+    state.notes.value = d.n || '';
+    resizeCanvas(state);
+    var w = state.width > 0 ? state.width : (state.stage.offsetWidth || 700);
+    var out = [];
+    var list = d.s || [];
+    for (var i = 0; i < list.length; i++) {
+      var s = list[i];
+      var p = s && s.p;
+      if (!p || !p.length) continue;
+      var pts = [];
+      for (var j = 0; j + 1 < p.length; j += 2) pts.push({ x: p[j] * w, y: p[j + 1] });
+      out.push({ tool: s.k || 'pen', color: s.c || '#111827', size: Number(s.z) || 2.4, points: pts });
+    }
+    state.strokes = out;
+    state.t = Number(d.t) || 0;
+    syncToolbarUI(state);
+    redrawAll(state);
+    updateHintVisibility(state);
+  }
+
+  function wbLocalGet(idx) {
+    try { var r = window.localStorage.getItem(WB_LOCAL_PREFIX + idx); return r ? JSON.parse(r) : null; } catch (err) { return null; }
+  }
+  function wbLocalSet(idx, data) {
+    try {
+      if (data) window.localStorage.setItem(WB_LOCAL_PREFIX + idx, JSON.stringify(data));
+      else window.localStorage.removeItem(WB_LOCAL_PREFIX + idx);
+    } catch (err) {}
+  }
+
+  function wbSave(state) {
+    if (state.saveTimer) { clearTimeout(state.saveTimer); state.saveTimer = null; }
+    var empty = wbIsEmpty(state);
+    var data = empty ? null : wbPack(state);
+    state.t = data ? data.t : Date.now();
+    state.touched = false;
+    wbLocalSet(state.idx, data);
+    if (wbSyncBase()) {
+      fetch(wbRemoteUrl(state.idx), data ? { method: 'PUT', body: JSON.stringify(data) } : { method: 'DELETE' })
+        .catch(function() {});
+    }
+  }
+
+  function wbScheduleSave(state) {
+    state.touched = true;
+    if (state.saveTimer) clearTimeout(state.saveTimer);
+    state.saveTimer = setTimeout(function() { wbSave(state); }, WB_SAVE_DELAY_MS);
+  }
+
+  function wbPull(state) {
+    if (!wbSyncBase()) return;
+    fetch(wbRemoteUrl(state.idx))
+      .then(function(r) { if (!r.ok) throw new Error('http'); return r.json(); })
+      .then(function(remote) {
+        if (state.touched || state.saveTimer) return; // há edição local ainda não enviada
+        if (remote) {
+          if ((Number(remote.t) || 0) > state.t) {
+            wbApply(state, remote);
+            wbLocalSet(state.idx, remote);
+          } else if (state.t > (Number(remote.t) || 0)) {
+            wbSave(state); // o local (offline) é mais novo
+          }
+        } else if (!wbIsEmpty(state)) {
+          wbSave(state); // banco ainda sem este quadro: envia o que já existe aqui
+        }
+      })
+      .catch(function() {});
+  }
+
+  function wbLoad(state) {
+    var local = wbLocalGet(state.idx);
+    if (local) wbApply(state, local);
+    wbPull(state);
+  }
+
+  function wbFlushAll() {
+    for (var key in wbStates) {
+      if (Object.prototype.hasOwnProperty.call(wbStates, key) && wbStates[key].saveTimer) wbSave(wbStates[key]);
+    }
+  }
+  document.addEventListener('visibilitychange', function() { if (document.hidden) wbFlushAll(); });
+  window.addEventListener('pagehide', wbFlushAll);
+
   var COLORS = [
     { id: 'ink', label: 'Preto', hex: '#111827' },
     { id: 'blue', label: 'Azul', hex: '#1D4ED8' },
@@ -9087,7 +9210,10 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
       dpr: 1,
       strokes: [],
       activeStroke: null,
-      clearConfirmTimer: null
+      clearConfirmTimer: null,
+      touched: false,
+      saveTimer: null,
+      t: 0
     };
     wbStates[idx] = state;
 
@@ -9120,6 +9246,7 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
 
     notes.addEventListener('input', function() {
       updateHintVisibility(state);
+      wbScheduleSave(state);
     });
 
     canvas.addEventListener('pointerdown', function(e) {
@@ -9155,6 +9282,7 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
         try { canvas.releasePointerCapture(e.pointerId); } catch (err) {}
       }
       state.strokes.push(state.activeStroke);
+      wbScheduleSave(state);
       state.activeStroke = null;
       redrawAll(state);
       updateHintVisibility(state);
@@ -9165,6 +9293,7 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
 
     syncToolbarUI(state);
     resizeCanvas(state);
+    wbLoad(state);
   }
 
   // Event delegation for whiteboard controls
@@ -9198,10 +9327,12 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
     } else if (action === 'bg') {
       state.bgIndex = (state.bgIndex + 1) % BGS.length;
       state.bg = BGS[state.bgIndex].id;
+      wbScheduleSave(state);
       syncToolbarUI(state);
     } else if (action === 'undo') {
       if (state.strokes.length > 0) {
         state.strokes.pop();
+        wbScheduleSave(state);
         redrawAll(state);
         updateHintVisibility(state);
       }
@@ -9212,6 +9343,7 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
         if (state.clearConfirmTimer) clearTimeout(state.clearConfirmTimer);
         state.strokes = [];
         state.notes.value = '';
+        wbScheduleSave(state);
         redrawAll(state);
         updateHintVisibility(state);
       } else {
@@ -9226,11 +9358,13 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
     } else if (action === 'expand') {
       state.boxHeight = Math.min(state.boxHeight + 280, 2200);
       state.stage.style.height = state.boxHeight + 'px';
+      wbScheduleSave(state);
       syncToolbarUI(state);
       resizeCanvas(state);
     } else if (action === 'shrink') {
       state.boxHeight = Math.max(state.boxHeight - 200, 360);
       state.stage.style.height = state.boxHeight + 'px';
+      wbScheduleSave(state);
       syncToolbarUI(state);
       resizeCanvas(state);
     } else if (action === 'download') {
@@ -9251,7 +9385,11 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
     allDetails[d].addEventListener('toggle', function() {
       if (this.open) {
         var wb = this.querySelector('.qa-whiteboard');
-        if (wb) initWhiteboard(wb);
+        if (wb) {
+          var prevState = wbStates[wb.getAttribute('data-wb-index')];
+          initWhiteboard(wb);
+          if (prevState) wbPull(prevState);
+        }
       }
     });
   }
