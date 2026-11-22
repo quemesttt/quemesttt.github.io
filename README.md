@@ -64,7 +64,7 @@ body {
   transition: width 0.08s linear;
 }
 .top-nav-inner {
-  max-width: 1240px;
+  max-width: none;
   margin: 0 auto;
   padding: 0 clamp(20px, 5vw, 56px);
   height: 52px;
@@ -131,7 +131,7 @@ body {
 
 /* Container editorial principal */
 .page-shell {
-  max-width: 1240px;
+  max-width: none;
   margin: 0 auto;
   padding: 52px clamp(20px, 5vw, 56px) 96px;
 }
@@ -1159,6 +1159,17 @@ img {
   font-weight: 600;
   color: var(--ink2);
   padding-top: 6px;
+}
+/* Meu progresso: rótulo à esquerda, painel/botões/mensagem na coluna da direita */
+#tf-group-progress .tf-group-label { grid-column: 1; grid-row: 1 / span 3; flex-wrap: wrap; align-content: flex-start; }
+#tf-group-progress .progress-panel,
+#tf-group-progress .tf-chips,
+#tf-group-progress .bk-msg { grid-column: 2; }
+@media (max-width: 760px) {
+  #tf-group-progress .tf-group-label { grid-row: auto; }
+  #tf-group-progress .progress-panel,
+  #tf-group-progress .tf-chips,
+  #tf-group-progress .bk-msg { grid-column: 1; }
 }
 .tf-dot {
   width: 8px;
@@ -8839,7 +8850,7 @@ details.formula-sheet[open] > summary .fs-hint::after { transform: rotate(-135de
   applyFilters();
   if (syncOn()) {
     var lbl = document.querySelector('#tf-group-progress .tf-group-label span[style*="font-weight:400"]');
-    if (lbl) lbl.textContent = '(compartilhado com todos que usam o site)';
+    if (lbl) lbl.textContent = '(compartilhado com todos)';
     setSyncStatus('sincronizando…');
     syncPull();
     setInterval(syncPull, SYNC_INTERVAL_MS);
